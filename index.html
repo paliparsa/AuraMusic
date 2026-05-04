@@ -629,30 +629,43 @@
                 throw new Error("Not found");
             },
             
-            // THE ULTIMATE BACKGROUND PLAY FIX: Extracts the RAW audio stream using the open-source Piped API.
+            // THE ULTIMATE BACKGROUND PLAY FIX: Dynamic Proxy Routing
+            // Instead of 1 Piped API, we have multiple to prevent rate limits and infinite error loops
+            pipedInstances: [
+                "https://pipedapi.kavin.rocks",
+                "https://pipedapi.smnz.de",
+                "https://api.piped.projectsegfau.lt",
+                "https://pipedapi.adminforge.de"
+            ],
+            
             async getRawAudioStream(videoId) {
-                try {
-                    const res = await fetch(`https://pipedapi.kavin.rocks/streams/${videoId}`);
-                    if(!res.ok) throw new Error("Piped API failed");
-                    const data = await res.json();
-                    if(data.error) throw new Error(data.error);
-                    
-                    // Prioritize .m4a (audio/mp4) for 100% native iOS/Android support
-                    const audioStream = data.audioStreams.find(s => s.mimeType.includes('audio/mp4')) || data.audioStreams[0];
-                    return audioStream.url;
-                } catch(e) {
-                    console.error("Audio extraction failed:", e);
-                    throw e;
+                let lastError = null;
+                for (const instance of this.pipedInstances) {
+                    try {
+                        const res = await fetch(`${instance}/streams/${videoId}`);
+                        if(!res.ok) continue; // Skip to next instance if blocked
+                        const data = await res.json();
+                        if(data.error) continue;
+                        
+                        // Grab highest quality audio stream (prefer m4a for Apple/Android native support)
+                        const audioStream = data.audioStreams.find(s => s.mimeType.includes('audio/mp4') || s.mimeType.includes('audio/webm')) || data.audioStreams[0];
+                        if(audioStream && audioStream.url) return audioStream.url;
+                    } catch(e) {
+                        lastError = e;
+                        console.warn(`Piped API failed on ${instance}`, e);
+                    }
                 }
+                throw new Error("All stream proxies failed. Please try again later.");
             },
 
             async fetchLyrics(artist, title) { try { const res = await fetch(`https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(title)}`); if(!res.ok) return null; return await res.json(); } catch(e) { return null; } }
         };
 
-        // --- NEW NATIVE AUDIO ENGINE ---
+        // --- NATIVE HTML5 AUDIO ENGINE ---
         const Player = {
             audio: new Audio(),
             duration: 0,
+            consecutiveErrors: 0, // Used to stop infinite skip loops
             
             init() {
                 this.audio.crossOrigin = "anonymous";
@@ -670,6 +683,7 @@
                 this.audio.addEventListener('timeupdate', () => this.onTimeUpdate());
                 this.audio.addEventListener('ended', () => this.next());
                 this.audio.addEventListener('play', () => {
+                    this.consecutiveErrors = 0; // Reset error loop on success
                     State.isPlaying = true; UI.setPlayState(true);
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
                 });
@@ -678,8 +692,29 @@
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 });
                 
+                // Native Audio Error handling to prevent freezing loops
+                this.audio.addEventListener('error', (e) => {
+                    console.warn("Audio Element Error:", e);
+                    this.handleErrorSkip("Stream failed to play.");
+                });
+                
                 // Initial iOS audio unlock
                 document.addEventListener('click', () => { if(this.audio.src === "") { this.audio.src = "data:audio/mp3;base64,//OExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"; this.audio.play().catch(()=>{}); } }, {once: true});
+            },
+
+            // CIRCUIT BREAKER for infinite loop prevention
+            handleErrorSkip(msg) {
+                UI.showToast(msg || "Stream unavailable. Skipping...");
+                this.consecutiveErrors++;
+                if(this.consecutiveErrors >= 3) {
+                    UI.showToast("Playback stopped: Multiple tracks failed.");
+                    this.consecutiveErrors = 0;
+                    UI.setPlayState(false);
+                    UI.updateMiniPlayer(State.currentTrack, false);
+                    return;
+                }
+                // Add a 1.5 second delay before skipping to give the UI time to breathe
+                setTimeout(() => this.next(), 1500);
             },
 
             async playTrack(track, queueList, index) {
@@ -696,20 +731,22 @@
                 }
 
                 try { 
-                    // 1. Get YouTube Video ID using the official Google API (Fulfills Project Requirement)
                     const videoId = await API.youtubeId(track.title, track.artist); 
-                    
-                    // 2. Extract Raw Audio Stream URL bypassing the restricted YouTube Iframe
                     const rawAudioUrl = await API.getRawAudioStream(videoId);
                     
-                    // 3. Play natively
                     this.audio.src = rawAudioUrl;
                     await this.audio.play();
-                    UI.updateMiniPlayer(track, false); // Remove loading state
+                    UI.updateMiniPlayer(track, false); 
 
                 } catch (e) {
-                    if(e.message === "API_KEY_REQUIRED") { UI.switchView('profile'); document.getElementById('yt-api-key-input').focus(); UI.showToast("YouTube API Key Required for Searches"); UI.updateMiniPlayer(track, false); } 
-                    else { UI.showToast("Playback error or stream unavailable."); this.next(); }
+                    if(e.message === "API_KEY_REQUIRED") { 
+                        UI.switchView('profile'); document.getElementById('yt-api-key-input').focus(); 
+                        UI.showToast("YouTube API Key Required for Searches"); 
+                        UI.updateMiniPlayer(track, false); 
+                    } else { 
+                        console.warn("Playback Error:", e);
+                        this.handleErrorSkip("Stream unavailable. Skipping..."); 
+                    }
                 }
             },
 
