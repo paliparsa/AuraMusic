@@ -285,8 +285,9 @@
 
         /* CRITICAL YOUTUBE FIX: 
            It MUST NOT be 0x0 or opacity:0 on iOS. 
-           It is now 300x300 but thrown completely off-screen. */
-        #yt-container { position: absolute; top: -9999px; left: -9999px; width: 300px; height: 300px; opacity: 0.01; pointer-events: none; z-index: -100; }
+           It is now FULL SCREEN (100vw x 100vh) to trick the OS into prioritizing it,
+           but hidden behind the UI with z-index and near-zero opacity. */
+        #yt-container { position: fixed; inset: 0; width: 100vw; height: 100vh; opacity: 0.01; pointer-events: none; z-index: -9999; }
         
         .toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-20px); background: white; color: black; padding: 12px 24px; border-radius: 50px; font-weight: 600; font-size: 0.9rem; opacity: 0; pointer-events: none; transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); z-index: 9999; box-shadow: 0 8px 24px rgba(0,0,0,0.3);}
         .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -638,7 +639,7 @@
 
         window.onYouTubeIframeAPIReady = function() { 
             Player.ytPlayer = new YT.Player('youtube-player', { 
-                height: '10', width: '10', 
+                height: '100%', width: '100%', 
                 playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1 }, 
                 events: { 'onStateChange': (e) => Player.onStateChange(e), 'onError': () => Player.next() } 
             }); 
@@ -657,10 +658,16 @@
                     navigator.mediaSession.setActionHandler('seekto', (details) => { if (this.ytPlayer && this.ytPlayer.seekTo && details.seekTime) this.ytPlayer.seekTo(details.seekTime, true); });
                 }
 
-                // Force auto-resume if mobile browser tries to pause an active session
+                // ULTIMATE BRUTE FORCE AUTO-RESUME
                 document.addEventListener('visibilitychange', () => {
                     if (document.visibilityState === 'hidden' && State.intendedPlayState) {
-                        setTimeout(() => { if (this.ytPlayer && this.ytPlayer.getPlayerState && this.ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING) this.ytPlayer.playVideo(); }, 100);
+                        let attempts = 0;
+                        const bruteForce = setInterval(() => {
+                            if (this.ytPlayer && this.ytPlayer.getPlayerState && this.ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING) {
+                                this.ytPlayer.playVideo();
+                            }
+                            if (++attempts > 20 || document.visibilityState === 'visible') clearInterval(bruteForce);
+                        }, 250); // Fire play command 4 times a second for 5 seconds to overpower browser pause.
                     }
                 });
             },
@@ -696,10 +703,8 @@
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
                 }
                 else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.CUED) { 
-                    // Bypassing browser auto-pause if the app was sent to background
                     if (document.visibilityState === 'hidden' && State.intendedPlayState) {
-                        this.ytPlayer.playVideo();
-                        return; 
+                        this.ytPlayer.playVideo(); return; 
                     }
                     State.isPlaying = false; State.intendedPlayState = false; UI.setPlayState(false); this.stopProgress(); 
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
