@@ -283,8 +283,10 @@
         .spinner { width: 30px; height: 30px; border: 3px solid rgba(0, 229, 255, 0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
-        /* CRITICAL: YouTube iframe MUST be technically visible to prevent mobile browsers from pausing it */
-        #yt-container { position: fixed; top: 50%; left: 50%; width: 10px; height: 10px; opacity: 0.01; pointer-events: none; z-index: -100; transform: translate(-50%, -50%); }
+        /* CRITICAL YOUTUBE FIX: 
+           It MUST NOT be 0x0 or opacity:0 on iOS. 
+           It is now 300x300 but thrown completely off-screen. */
+        #yt-container { position: absolute; top: -9999px; left: -9999px; width: 300px; height: 300px; opacity: 0.01; pointer-events: none; z-index: -100; }
         
         .toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%) translateY(-20px); background: white; color: black; padding: 12px 24px; border-radius: 50px; font-weight: 600; font-size: 0.9rem; opacity: 0; pointer-events: none; transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); z-index: 9999; box-shadow: 0 8px 24px rgba(0,0,0,0.3);}
         .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -321,11 +323,6 @@
     </script>
 </head>
 <body>
-
-    <!-- AUDIO WAKE LOCK: A silent audio file that forces mobile OS to keep the app alive in background -->
-    <audio id="audio-wake-lock" loop playsinline>
-        <source src="data:audio/mp3;base64,//OExAAAAANIAAAAAExBTUUzLjEwMKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" type="audio/mpeg">
-    </audio>
 
     <!-- 1. AUTHENTICATION VIEW -->
     <div id="auth-view">
@@ -584,20 +581,6 @@
          JAVASCRIPT APPLICATION LOGIC
          ========================================= -->
     <script>
-        // --- 1. AUDIO WAKE LOCK FOR BACKGROUND PERSISTENCE ---
-        // This is a web audio hack. By playing a silent, native HTML5 audio element on loop, 
-        // the OS considers the app an active media player, keeping the YouTube iframe alive when backgrounded.
-        const audioWakeLock = document.getElementById('audio-wake-lock');
-        const unlockAudioContext = () => {
-            audioWakeLock.play().catch(e => console.warn('Wake lock blocked:', e));
-            document.removeEventListener('click', unlockAudioContext);
-            document.removeEventListener('touchstart', unlockAudioContext);
-        };
-        document.addEventListener('click', unlockAudioContext);
-        document.addEventListener('touchstart', unlockAudioContext);
-
-
-        // --- 2. PROGRESSIVE WEB APP (PWA) MODULE ---
         const PWAModule = {
             deferredPrompt: null,
             init() { this.injectDynamicManifest(); this.setupInstallPrompts(); },
@@ -655,7 +638,7 @@
 
         window.onYouTubeIframeAPIReady = function() { 
             Player.ytPlayer = new YT.Player('youtube-player', { 
-                height: '10', width: '10', // Needs dimensions to trick browser
+                height: '10', width: '10', 
                 playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1 }, 
                 events: { 'onStateChange': (e) => Player.onStateChange(e), 'onError': () => Player.next() } 
             }); 
@@ -666,20 +649,18 @@
             init() { 
                 const tag = document.createElement('script'); tag.src = "https://www.youtube.com/iframe_api"; document.getElementsByTagName('script')[0].parentNode.insertBefore(tag, document.getElementsByTagName('script')[0]); 
                 
-                // Initialize Native Media Session API Handlers for Lock Screen
                 if ('mediaSession' in navigator) {
-                    navigator.mediaSession.setActionHandler('play', () => this.toggle());
-                    navigator.mediaSession.setActionHandler('pause', () => this.toggle());
+                    navigator.mediaSession.setActionHandler('play', () => { State.intendedPlayState = true; this.ytPlayer.playVideo(); });
+                    navigator.mediaSession.setActionHandler('pause', () => { State.intendedPlayState = false; this.ytPlayer.pauseVideo(); });
                     navigator.mediaSession.setActionHandler('previoustrack', () => this.prev());
                     navigator.mediaSession.setActionHandler('nexttrack', () => this.next());
                     navigator.mediaSession.setActionHandler('seekto', (details) => { if (this.ytPlayer && this.ytPlayer.seekTo && details.seekTime) this.ytPlayer.seekTo(details.seekTime, true); });
                 }
 
-                // Visibility API Auto-Resume Hack
-                // If YouTube internal script pauses because the tab hides, force play it back immediately
+                // Force auto-resume if mobile browser tries to pause an active session
                 document.addEventListener('visibilitychange', () => {
                     if (document.visibilityState === 'hidden' && State.intendedPlayState) {
-                        setTimeout(() => { if (this.ytPlayer && this.ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING) this.ytPlayer.playVideo(); }, 100);
+                        setTimeout(() => { if (this.ytPlayer && this.ytPlayer.getPlayerState && this.ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING) this.ytPlayer.playVideo(); }, 100);
                     }
                 });
             },
@@ -691,7 +672,6 @@
                 if(document.getElementById('sec-home').classList.contains('active')) UI.renderRecentRotation();
                 UI.loadLyricsForTrack(track);
                 
-                // Update Native OS Metadata (Lock screen & Smartwatches)
                 if ('mediaSession' in navigator) {
                     navigator.mediaSession.metadata = new MediaMetadata({ title: track.title, artist: track.artist, album: 'Aura Music', artwork: [{ src: track.thumb, sizes: '600x600', type: 'image/jpeg' }] });
                 }
@@ -712,15 +692,20 @@
             
             onStateChange(e) {
                 if (e.data === YT.PlayerState.PLAYING) { 
-                    State.isPlaying = true; this.duration = this.ytPlayer.getDuration(); UI.setPlayState(true); this.startProgress(); UI.updateMiniPlayer(State.currentTrack, false); 
+                    State.isPlaying = true; State.intendedPlayState = true; this.duration = this.ytPlayer.getDuration(); UI.setPlayState(true); this.startProgress(); UI.updateMiniPlayer(State.currentTrack, false); 
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
                 }
                 else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.CUED) { 
-                    State.isPlaying = false; UI.setPlayState(false); this.stopProgress(); 
+                    // Bypassing browser auto-pause if the app was sent to background
+                    if (document.visibilityState === 'hidden' && State.intendedPlayState) {
+                        this.ytPlayer.playVideo();
+                        return; 
+                    }
+                    State.isPlaying = false; State.intendedPlayState = false; UI.setPlayState(false); this.stopProgress(); 
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
                 }
                 else if (e.data === YT.PlayerState.ENDED) { 
-                    State.isPlaying = false; this.stopProgress(); this.next(); 
+                    State.isPlaying = false; State.intendedPlayState = false; this.stopProgress(); this.next(); 
                     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
                 }
             },
@@ -734,7 +719,6 @@
                         document.querySelectorAll('.time-total').forEach(el => el.textContent = UI.formatTime(this.duration));
                         document.querySelectorAll('.seek-bar').forEach(sb => { if(!State.isDragging) { sb.value = pct; sb.style.setProperty('--progress', `${pct}%`); } });
                         
-                        // Sync Native OS Progress Bar
                         if ('mediaSession' in navigator && this.duration > 0 && !isNaN(cur)) { try { navigator.mediaSession.setPositionState({ duration: this.duration, playbackRate: this.ytPlayer.getPlaybackRate() || 1, position: cur }); } catch(e){} }
 
                         if(State.showLyrics && State.parsedLyrics.length > 0) {
